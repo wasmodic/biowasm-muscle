@@ -1,0 +1,294 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <title>MUSCLE WebAssembly</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <!-- Aioli / Biowasm -->
+  <script src="https://biowasm.com/cdn/v3/aioli.js"></script>
+  <style>
+    body {
+      font-family: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      margin: 1.5rem;
+      max-width: 900px;
+    }
+    h1 {
+      font-size: 1.75rem;
+      margin-bottom: 0.5rem;
+    }
+    textarea {
+      width: 100%;
+      min-height: 160px;
+      font-family: monospace;
+      padding: 0.5rem;
+      border-radius: 4px;
+      border: 1px solid #ccc;
+      box-sizing: border-box;
+    }
+    button, select {
+      padding: 0.5rem 0.75rem;
+      border-radius: 4px;
+      border: 1px solid #ccc;
+      background: #f5f5f5;
+      cursor: pointer;
+      font-size: 0.9rem;
+    }
+    button:disabled {
+      opacity: 0.6;
+      cursor: not-allowed;
+    }
+    .btn-primary {
+      background: #2563eb;
+      color: white;
+      border-color: #2563eb;
+    }
+    .btn-secondary {
+      background: #e5e7eb;
+    }
+    .btn-ghost {
+      background: transparent;
+      border-color: transparent;
+      color: #4b5563;
+      text-decoration: underline;
+    }
+    .controls-row {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 0.5rem;
+      margin-top: 0.5rem;
+      margin-bottom: 0.5rem;
+    }
+    .output-box {
+      margin-top: 1rem;
+      padding: 0.5rem;
+      border-radius: 4px;
+      border: 1px solid #e5e7eb;
+      background: #f9fafb;
+      overflow-x: auto;
+      white-space: pre;
+      font-family: monospace;
+      font-size: 0.85rem;
+      max-height: 400px;
+    }
+    .small {
+      font-size: 0.85rem;
+      color: #6b7280;
+    }
+  </style>
+</head>
+<body>
+  <h1>MUSCLE WebAssembly</h1>
+  <p class="small">
+    MUSCLE (MUltiple Sequence Comparison by Log-Expectation) running entirely in your browser via WebAssembly.
+    Your sequences stay on your machine.
+  </p>
+
+  <label for="input-sequence"><strong>Input sequence(s) (FASTA)</strong></label>
+  <textarea id="input-sequence" placeholder="Paste your FASTA sequences here or upload a file"></textarea>
+
+  <div class="controls-row">
+    <button type="button" id="btn-upload" class="btn-secondary">Upload FASTA file</button>
+    <button type="button" id="btn-example" class="btn-secondary">Use example</button>
+    <button type="button" id="btn-clear" class="btn-secondary">Clear</button>
+  </div>
+
+  <div style="margin-top: 0.5rem;">
+    <label for="output-format"><strong>Output format</strong></label>
+    <select id="output-format">
+      <option>FASTA</option>
+      <option>Clustal</option>
+      <option>Clustal (strict)</option>
+      <option>HTML</option>
+      <option>GCG MSF</option>
+      <option>Phylip interleaved</option>
+      <option>Phylip sequential</option>
+    </select>
+  </div>
+
+  <div class="controls-row" style="margin-top: 1rem;">
+    <button type="button" id="btn-run" class="btn-primary">Run alignment</button>
+    <button type="button" id="btn-download" class="btn-secondary" disabled>Download result</button>
+    <span id="status" class="small"></span>
+  </div>
+
+  <div>
+    <h3>Alignment output</h3>
+    <div id="output" class="output-box">No output yet</div>
+  </div>
+
+  <p class="small" style="margin-top: 1.5rem;">
+    <a href="https://github.com/wasmodic/bioweasm-muscle" target="_blank" rel="noopener noreferrer">
+      Open source on GitHub
+    </a>
+  </p>
+
+  <!-- Hidden file input for uploads -->
+  <input type="file" id="file-input" accept=".fasta,.fa,.fas,.txt,.seq" style="display:none" />
+
+  <script type="module">
+    // Example sequences
+    const exampleSequence = `>test1 
+MGDVEKGKKIFIMKCSQCHTVEKGGKHKTGPNLHGLFGRKTGQAPGYSYTAANKNKGIIW 
+GEDTLMEYLENPKKYIPGTKMIFVGIKKKEERADLIAYLKKATNE  
+>test2 
+MGDVEKGKKIFVQKCAQCHTVEKGGKHKTGPNLHGLFGRKTGQAAGFSYTDANKNKGITW 
+GEDTLMEYLENPKKYIPGTKMIFAGIKKKGERADLIAYLKKATNE 
+>test3 
+MTEFKAGSAKKGATLFKTRCLQCHTVEKGGPHKVGPNLHGIFGRHSGQAEGYSYTDANIK 
+KNVLWDENNMSEYLTNPKKYIPGTKMAFGGLKKEKDRNDLITYLK`;
+
+    const textarea = document.getElementById("input-sequence");
+    const btnUpload = document.getElementById("btn-upload");
+    const btnExample = document.getElementById("btn-example");
+    const btnClear = document.getElementById("btn-clear");
+    const btnRun = document.getElementById("btn-run");
+    const btnDownload = document.getElementById("btn-download");
+    const fileInput = document.getElementById("file-input");
+    const outputDiv = document.getElementById("output");
+    const statusSpan = document.getElementById("status");
+    const formatSelect = document.getElementById("output-format");
+
+    let lastResult = "";
+    let cliInstance = null;
+    let cliInitializing = null;
+
+    async function getCLI() {
+      if (cliInstance) return cliInstance;
+      if (!cliInitializing) {
+        cliInitializing = (async () => {
+          // Load MUSCLE via Aioli
+          const cli = await new Aioli(["muscle/3.8.1551"]);
+          return cli;
+        })();
+      }
+      cliInstance = await cliInitializing;
+      return cliInstance;
+    }
+
+    const formatConfig = {
+      "FASTA":               { flag: "",           ext: "fa",   mime: "text/plain" },
+      "Clustal":             { flag: "-clw",       ext: "aln",  mime: "text/plain" },
+      "Clustal (strict)":    { flag: "-clwstrict", ext: "aln",  mime: "text/plain" },
+      "HTML":                { flag: "-html",      ext: "html", mime: "text/html" },
+      "GCG MSF":             { flag: "-msf",       ext: "msf",  mime: "text/plain" },
+      "Phylip interleaved":  { flag: "-phyi",      ext: "phy",  mime: "text/plain" },
+      "Phylip sequential":   { flag: "-phys",      ext: "phy",  mime: "text/plain" }
+    };
+
+    async function performAlignment(sequence, format) {
+      const cli = await getCLI();
+
+      // Mount input sequence as a virtual file
+      await cli.mount({
+        name: "input.fa",
+        data: sequence
+      });
+
+      const config = formatConfig[format] || formatConfig["FASTA"];
+      const outputFile = `output.${config.ext}`;
+
+      let muscleCommand = `muscle -in input.fa -out ${outputFile}`.trim();
+      if (config.ext !== "fa") {
+        muscleCommand = `muscle ${config.flag} -in input.fa -out ${outputFile}`.trim();
+      }
+
+      await cli.exec(muscleCommand);
+      const output = await cli.cat(outputFile);
+      return { output, ext: config.ext, mime: config.mime };
+    }
+
+    function setStatus(message) {
+      statusSpan.textContent = message || "";
+    }
+
+    function setOutput(text) {
+      // Use textContent to avoid HTML injection
+      outputDiv.textContent = text || "No output";
+    }
+
+    function downloadFile(content, filename, mimeType) {
+      const blob = new Blob([content], { type: mimeType || "text/plain" });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement("a");
+      a.href = url;
+      a.download = filename;
+      document.body.appendChild(a);
+      a.click();
+      document.body.removeChild(a);
+      URL.revokeObjectURL(url);
+    }
+
+    btnExample.addEventListener("click", () => {
+      textarea.value = exampleSequence;
+    });
+
+    btnClear.addEventListener("click", () => {
+      textarea.value = "";
+      lastResult = "";
+      setOutput("No output yet");
+      btnDownload.disabled = true;
+    });
+
+    btnUpload.addEventListener("click", () => {
+      fileInput.value = "";
+      fileInput.click();
+    });
+
+    fileInput.addEventListener("change", (event) => {
+      const file = event.target.files && event.target.files[0];
+      if (!file) return;
+
+      const reader = new FileReader();
+      reader.onload = e => {
+        const content = e.target.result;
+        if (typeof content === "string") {
+          textarea.value = content;
+        }
+      };
+      reader.readAsText(file);
+    });
+
+    btnRun.addEventListener("click", async () => {
+      const sequence = textarea.value.trim();
+      if (!sequence) {
+        alert("Please paste a FASTA sequence or upload a file.");
+        return;
+      }
+
+      const format = formatSelect.value;
+      setStatus("Running MUSCLE alignment...");
+      btnRun.disabled = true;
+      btnDownload.disabled = true;
+
+      try {
+        const { output, ext, mime } = await performAlignment(sequence, format);
+        lastResult = output;
+        setOutput(output);
+        btnDownload.disabled = false;
+
+        // Build a reasonable filename
+        const safeFormat = format.toLowerCase().replace(/\s+/g, "_");
+        const filename = `alignment.${safeFormat}.${ext}`;
+        // Optional: auto download. If you prefer not to auto download, comment this line.
+        downloadFile(output, filename, mime);
+        setStatus("Alignment completed.");
+      } catch (err) {
+        console.error("Alignment failed:", err);
+        alert("Alignment failed. Check the console for details.");
+        setStatus("Alignment failed.");
+      } finally {
+        btnRun.disabled = false;
+      }
+    });
+
+    btnDownload.addEventListener("click", () => {
+      if (!lastResult) return;
+      const format = formatSelect.value;
+      const config = formatConfig[format] || formatConfig["FASTA"];
+      const safeFormat = format.toLowerCase().replace(/\s+/g, "_");
+      const filename = `alignment.${safeFormat}.${config.ext}`;
+      downloadFile(lastResult, filename, config.mime);
+    });
+  </script>
+</body>
+</html>
